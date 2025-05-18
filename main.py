@@ -375,7 +375,7 @@ def train(args, start_epoch=1):
     print('#Params G:', sum(p.numel() for p in G.parameters()))
     # Encoder 參數計算（假設為 enc_layers + resize + pool）
     encoder_params = sum(p.numel() for p in G.enc_layers.parameters()) + \
-                     sum(p.numel() for p in [G.resize, G.pool])
+                     sum(param.numel() for layer in [G.resize, G.pool] for param in layer.parameters())
     print('#Params E:', encoder_params)
 
     ema_G = EMA(G, decay=0.999)
