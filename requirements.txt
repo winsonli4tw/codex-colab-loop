@@ -5,3 +5,4 @@ lpips
 tqdm
 psutil
 matplotlib
+torchinfo
