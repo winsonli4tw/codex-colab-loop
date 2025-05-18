@@ -3,4 +3,5 @@ torchvision
 torchmetrics>=1.3
 lpips
 tqdm
+psutil
 matplotlib
