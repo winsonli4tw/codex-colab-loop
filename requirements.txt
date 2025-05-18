@@ -1,4 +1,3 @@
-# requirements.txt  (最小可用範例)
 torch>=2.0
 torchvision
 torchmetrics>=1.3
