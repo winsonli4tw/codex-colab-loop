@@ -31,12 +31,10 @@ INV = UnNormalize(mean, std)
 
 # ────────── Utility Functions ──────────
 def get_cifar10(batch_size, num_workers, data_root):
-    # 訓練資料的 transform（可包含增強）
     train_transform = transforms.Compose([
         transforms.ToTensor(),
         transforms.Normalize(mean, std)
     ])
-    # 測試資料的 transform（無增強）
     test_transform = transforms.Compose([
         transforms.ToTensor(),
         transforms.Normalize(mean, std)
@@ -147,7 +145,6 @@ def pretrain_disc(D, train_loader, device, ckpt_dir, epochs=3):
     torch.save(D.state_dict(), os.path.join(ckpt_dir, "D_pretrain.pth"))
     return D
 
-# ────────── Feature Matching Loss ──────────
 def feature_matching_loss(real_features, fake_features, batch_idx=None, is_last_batch=False):
     loss = 0
     for rf, ff in zip(real_features, fake_features):
@@ -249,26 +246,6 @@ class ResidualBlock(nn.Module):
         x += self.shortcut(residual)
         return F.relu(x)
 
-# SelfAttention 未使用，已註解
-# class SelfAttention(nn.Module):
-#     def __init__(self, in_channels):
-#         super().__init__()
-#         self.query = nn.Conv2d(in_channels, in_channels // 8, 1)
-#         self.key = nn.Conv2d(in_channels, in_channels // 8, 1)
-#         self.value = nn.Conv2d(in_channels, in_channels, 1)
-#         self.gamma = nn.Parameter(torch.zeros(1))
-#         
-#     def forward(self, x):
-#         batch_size, C, width, height = x.size()
-#         query = self.query(x).view(batch_size, -1, width * height).permute(0, 2, 1)
-#         key = self.key(x).view(batch_size, -1, width * height)
-#         energy = torch.bmm(query, key)
-#         attention = F.softmax(energy, dim=2)
-#         value = self.value(x).view(batch_size, -1, width * height)
-#         out = torch.bmm(value, attention.permute(0, 2, 1))
-#         out = out.view(batch_size, C, width, height)
-#         return self.gamma * out + x
-
 class Disc(nn.Module):
     def __init__(self):
         super().__init__()
@@ -281,7 +258,6 @@ class Disc(nn.Module):
             nn.BatchNorm2d(192),
             nn.LeakyReLU(0.2, inplace=True)
         )
-        # self.attention = SelfAttention(192)  # 未使用，已註解
         self.layer2_extra = nn.Sequential(
             nn.utils.spectral_norm(nn.Conv2d(192, 192, 3, 1, 1)),
             nn.BatchNorm2d(192),
@@ -324,7 +300,6 @@ class Disc(nn.Module):
         features.append(x)
         x = self.layer2(x)
         features.append(x)
-        # x = self.attention(x)  # 未使用，已註解
         x = self.layer2_extra(x)
         features.append(x)
         x = self.layer3(x)
@@ -337,9 +312,72 @@ class Disc(nn.Module):
             return x, features
         return x
 
+def save_checkpoint(ckpt_dir, epoch, G, D, optG, optD, sched, scaler, training_stats, best_val, best_fid, best_ema_fid, ema_G):
+    ckpt = Path(ckpt_dir)
+    checkpoint_data = {
+        "epoch": epoch,
+        "G": G.state_dict(),
+        "D": D.state_dict(),
+        "optG": optG.state_dict(),
+        "optD": optD.state_dict(),
+        "sched": sched.state_dict(),
+        "scaler": scaler.state_dict(),
+        "best_val": best_val,
+        "training_stats": training_stats,
+        "fid": best_fid,
+        "ema_fid": best_ema_fid,
+        "ema_G_decay": ema_G.decay
+    }
+    torch.save(checkpoint_data, ckpt / "last.pth")
+
+def save_best_checkpoint(ckpt_dir, epoch, G, val_loss, fid, ema_fid):
+    ckpt = Path(ckpt_dir)
+    checkpoint_data = {
+        "G": G.state_dict(),
+        "epoch": epoch,
+        "val_loss": val_loss,
+        "fid": fid,
+        "ema_fid": ema_fid
+    }
+    torch.save(checkpoint_data, ckpt / "best.pth")
+
+def save_metrics(ckpt_dir, epoch, tr_l, va_l, d_loss, d_real_acc, d_fake_acc, fid_val, ema_fid_val, t_s):
+    ckpt = Path(ckpt_dir)
+    metrics_file = ckpt / "metrics.csv"
+    row = [epoch, f"{tr_l:.6f}", f"{va_l:.6f}", f"{d_loss:.6f}", f"{d_real_acc:.6f}", 
+           f"{d_fake_acc:.6f}", fid_val, ema_fid_val, f"{t_s:.1f}"]
+    
+    try:
+        with open(metrics_file, "a", newline="") as f:
+            csv.writer(f).writerow(row)
+    except FileNotFoundError:
+        ckpt.mkdir(parents=True, exist_ok=True)
+        with open(metrics_file, "w", newline="") as f:
+            writer = csv.writer(f)
+            writer.writerow(["epoch", "train_loss", "val_loss", "d_loss", "d_real_acc", "d_fake_acc", "fid", "ema_fid", "time_sec"])
+            writer.writerow(row)
+
+def save_latest_stats(ckpt_dir, epoch, args, tr_l, va_l, d_loss, d_real_acc, d_fake_acc, 
+                     fid_val, ema_fid_val, t_s, adv_w, feat_match_weight, kl_scale, ema_decay):
+    ckpt = Path(ckpt_dir)
+    with open(ckpt / "latest_stats.txt", "w") as f:
+        f.write(f"Epoch: {epoch}/{args.epochs}\n")
+        f.write(f"Train Loss: {tr_l:.6f}\n")
+        f.write(f"Val Loss: {va_l:.6f}\n")
+        f.write(f"D Loss: {d_loss:.6f}\n")
+        f.write(f"D Real Accuracy: {d_real_acc:.6f}\n")
+        f.write(f"D Fake Accuracy: {d_fake_acc:.6f}\n")
+        f.write(f"FID: {fid_val}\n")
+        f.write(f"EMA FID: {ema_fid_val}\n")
+        f.write(f"Time: {t_s:.1f} sec\n")
+        f.write(f"Adversarial Weight: {adv_w:.6f}\n")
+        f.write(f"Feature Match Weight: {feat_match_weight:.6f}\n")
+        f.write(f"KL Scale: {kl_scale:.6f}\n")
+        f.write(f"EMA Decay: {ema_decay:.6f}\n")
+
 def train(args, start_epoch=1):
     dev = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    use_amp = torch.cuda.is_available()  # AMP 相容性
+    use_amp = torch.cuda.is_available()
     percept = lpips.LPIPS(net='vgg').to(dev)
 
     ckpt = Path(args.ckpt_dir)
@@ -370,10 +408,8 @@ def train(args, start_epoch=1):
 
     G, D = CVAE(args.z_dim).to(dev), Disc().to(dev)
 
-    # 模型資訊輸出
-    print(summary(G, input_size=[(1, 3, 32, 32), (1, 10)]))  # 修正 input_size
+    print(summary(G, input_size=[(1, 3, 32, 32), (1, 10)]))
     print('#Params G:', sum(p.numel() for p in G.parameters()))
-    # Encoder 參數計算（假設為 enc_layers + resize + pool）
     encoder_params = sum(p.numel() for p in G.enc_layers.parameters()) + \
                      sum(param.numel() for layer in [G.resize, G.pool] for param in layer.parameters())
     print('#Params E:', encoder_params)
@@ -401,8 +437,8 @@ def train(args, start_epoch=1):
     optG = torch.optim.AdamW(G.parameters(), lr=args.lr, betas=(0.5, 0.999), weight_decay=1e-5)
     optD = torch.optim.Adam(D.parameters(), lr=args.d_lr, betas=(0.0, 0.9))
     sched = CosineAnnealingLR(optG, args.epochs, eta_min=1e-8)
-    scaler = GradScaler(enabled=use_amp)  # AMP 相容性
-    fid = FrechetInceptionDistance(feature=2048, normalize=True).to(dev)  # FID 初始化
+    scaler = GradScaler(enabled=use_amp)
+    fid = FrechetInceptionDistance(feature=2048, normalize=True).to(dev)
 
     training_stats = []
 
@@ -412,7 +448,7 @@ def train(args, start_epoch=1):
         G.train()
         D.train()
 
-        train_D = ep >= 5  # 前 5 個 epoch 只訓練 G
+        train_D = ep >= 5
 
         current_batch_size = get_batch_size_for_epoch(64, args.batch_size, ep, args.epochs)
         if current_batch_size != last_batch_size:
@@ -428,7 +464,7 @@ def train(args, start_epoch=1):
         total_samples = 0
         d_real_mean = d_fake_mean = d_recon_mean = 0
 
-        kl_scale = args.kl_max * min(ep / args.kl_warmup, 1.0)  # KL weight 佈局
+        kl_scale = args.kl_max * min(ep / args.kl_warmup, 1.0)
 
         if ep < args.adv_warmup_start:
             current_adv_w = 0.0
@@ -452,9 +488,8 @@ def train(args, start_epoch=1):
             y1 = F.one_hot(y, 10).float()
             batch_size = x.size(0)
 
-            # Generator Training
             for p in G.parameters():
-                p.requires_grad_(True)  # 使用 requires_grad_ 代替直接賦值
+                p.requires_grad_(True)
             for p in D.parameters():
                 p.requires_grad_(False)
 
@@ -471,8 +506,8 @@ def train(args, start_epoch=1):
                 else:
                     x_accum, y_accum, y1_accum = x, y, y1
 
-                with (autocast() if use_amp else nullcontext()):  # AMP 相容性
-                    r, mu, lv = G(x_accum, y1_accum)
+                with (autocast() if use_amp else nullcontext()):
+                    r, mu, lv = G(x_accum, y1rian_accum)
                     rec, kld = mse_kld(r, x_accum, mu, lv)
 
                     if current_adv_w > 0 and train_D:
@@ -516,18 +551,16 @@ def train(args, start_epoch=1):
             kld_s += kld.item()
             n += batch_size
 
-            # Discriminator Training
             if train_D:
                 for p in G.parameters():
-                    p.requires_grad_(False)  # 使用 requires_grad_ 代替直接賦值
+                    p.requires_grad_(False)
                 for p in D.parameters():
                     p.requires_grad_(True)
 
                 optD.zero_grad()
-                with (autocast() if use_amp else nullcontext()):  # AMP 相容性
+                with (autocast() if use_amp else nullcontext()):
                     with torch.no_grad():
                         r, mu, lv = G(x, y1)
-                        # diff_augment 已移除，這裡假設無增強
                         x_aug = x
                         r_aug = r.detach()
                         z_rand = torch.randn(batch_size, args.z_dim, device=dev)
@@ -610,7 +643,7 @@ def train(args, start_epoch=1):
             G.eval()
             with torch.no_grad():
                 for x, _ in va:
-                    fid.update(x.to(dev).float(), real=True)  # FID 真實資料
+                    fid.update(x.to(dev).float(), real=True)
                 batch = 100
                 for cls in range(10):
                     loops = args.n_gen_per_cls // batch
@@ -619,7 +652,7 @@ def train(args, start_epoch=1):
                         y = torch.full((batch,), cls, device=dev)
                         y1 = F.one_hot(y, 10).float()
                         fake = G.decode(z, y1).clamp(0, 1)
-                        fid.update(fake, real=False)  # FID 生成資料
+                        fid.update(fake, real=False)
             fid_val = fid.compute().item()
             log_message(f"Main FID@Ep{ep}: {fid_val:.2f}")
 
@@ -641,7 +674,7 @@ def train(args, start_epoch=1):
             ema_G.restore()
             log_message(f"EMA FID@Ep{ep}: {ema_fid_val:.2f}")
 
-            if ep % 5 == 0:  # Qualitative 影像輸出
+            if ep % 5 == 0:
                 generate_grid(ep, G, args.z_dim, dev, args.ckpt_dir)
 
             if ep > 5:
@@ -693,88 +726,34 @@ def train(args, start_epoch=1):
             "feat_match_weight": feat_match_weight
         })
 
-        try:
-            with open(ckpt / "metrics.csv", "a", newline="") as f:
-                csv.writer(f).writerow([ep,
-                                        f"{tr_l:.6f}",
-                                        f"{va_l:.6f}",
-                                        f"{avg_d_loss:.6f}",
-                                        f"{d_real_acc:.6f}",
-                                        f"{d_fake_acc:.6f}",
-                                        fid_val,
-                                        ema_fid_val,
-                                        f"{t_s:.1f}"])
-        except FileNotFoundError:
-            ckpt.mkdir(parents=True, exist_ok=True)
-            with open(ckpt / "metrics.csv", "w", newline="") as f:
-                writer = csv.writer(f)
-                writer.writerow(["epoch", "train_loss", "val_loss", "d_loss", "d_real_acc", "d_fake_acc", "fid", "ema_fid", "time_sec"])
-                writer.writerow([ep,
-                                f"{tr_l:.6f}",
-                                f"{va_l:.6f}",
-                                f"{avg_d_loss:.6f}",
-                                f"{d_real_acc:.6f}",
-                                f"{d_fake_acc:.6f}",
-                                fid_val,
-                                ema_fid_val,
-                                f"{t_s:.1f}"])
+        save_metrics(args.ckpt_dir, ep, tr_l, va_l, avg_d_loss, d_real_acc, d_fake_acc, fid_val, ema_fid_val, t_s)
+        save_latest_stats(args.ckpt_dir, ep, args, tr_l, va_l, avg_d_loss, d_real_acc, d_fake_acc, 
+                         fid_val, ema_fid_val, t_s, current_adv_w, feat_match_weight, kl_scale, ema_G.decay)
+        save_checkpoint(args.ckpt_dir, ep, G, D, optG, optD, sched, scaler, training_stats, 
+                        args.best_val, best_fid, best_ema_fid, ema_G)
 
-        with open(ckpt / "latest_stats.txt", "w") as f:
-            f.write(f"Epoch: {ep}/{args.epochs}\n")
-            f.write(f"Train Loss: {tr_l:.6f}\n")
-            f.write(f"Val Loss: {va_l:.6f}\n")
-            f.write(f"D Loss: {avg_d_loss:.6f}\n")
-            f.write(f"D Real Accuracy: {d_real_acc:.6f}\n")
-            f.write(f"D Fake Accuracy: {d_fake_acc:.6f}\n")
-            f.write(f"FID: {fid_val}\n")
-            f.write(f"EMA FID: {ema_fid_val}\n")
-            f.write(f"Time: {t_s:.1f} sec\n")
-            f.write(f"Adversarial Weight: {current_adv_w:.6f}\n")
-            f.write(f"Feature Match Weight: {feat_match_weight:.6f}\n")
-            f.write(f"KL Scale: {kl_scale:.6f}\n")
-            f.write(f"EMA Decay: {ema_G.decay:.6f}\n")
+        torch.random.manual_seed(ep)
+        n_samples = 64
+        z = torch.randn(n_samples, args.z_dim, device=dev)
+        base = torch.arange(10, device=dev).repeat_interleave(6)
+        extra = torch.randint(0, 10, (n_samples - base.size(0),), device=dev)
+        y_labels = torch.cat([base, extra])
+        y_onehot = F.one_hot(y_labels, 10).float()
+        ema_G.apply_shadow()
+        with torch.no_grad():
+            samples = G.decode(z, y_onehot)
+            grid = make_grid(samples, nrow=8, normalize=True, value_range=(0, 1))
+            save_image(grid, ckpt / f"samples_ep{ep:03d}.png")
+        ema_G.restore()
 
-        if ep % args.save_every == 0 or ep == args.epochs:
-            torch.save({
-                "epoch": ep,
-                "G": G.state_dict(),
-                "D": D.state_dict(),
-                "optG": optG.state_dict(),
-                "optD": optD.state_dict(),
-                "sched": sched.state_dict(),
-                "scaler": scaler.state_dict(),
-                "best_val": args.best_val,
-                "training_stats": training_stats,
-                "fid": best_fid  # 加入 fid
-            }, ckpt / "last.pth")
+        if va_l < best_val_loss or (isinstance(fid_val, float) and fid_val < best_fid):
+            best_val_loss = min(va_l, best_val_loss)
+            args.best_val = best_val_loss
+            save_best_checkpoint(args.ckpt_dir, ep, G, va_l, fid_val, ema_fid_val)
+            log_message(f"New best model! Val Loss: {va_l:.4f}, FID: {fid_val if isinstance(fid_val, float) else 'N/A'}")
 
-            torch.random.manual_seed(ep)
-            n_samples = 64
-            z = torch.randn(n_samples, args.z_dim, device=dev)
-            base = torch.arange(10, device=dev).repeat_interleave(6)
-            extra = torch.randint(0, 10, (n_samples - base.size(0),), device=dev)
-            y_labels = torch.cat([base, extra])
-            y_onehot = F.one_hot(y_labels, 10).float()
-            ema_G.apply_shadow()
-            with torch.no_grad():
-                samples = G.decode(z, y_onehot)
-                grid = make_grid(samples, nrow=8, normalize=True, value_range=(0, 1))
-                save_image(grid, ckpt / f"samples_ep{ep:03d}.png")
-            ema_G.restore()
-
-            if va_l < args.best_val:
-                args.best_val = va_l
-                torch.save({
-                    "G": G.state_dict(),
-                    "epoch": ep,
-                    "val_loss": va_l,
-                    "fid": fid_val,
-                    "ema_fid": ema_fid_val
-                }, ckpt / "best.pth")
-                log_message(f"New best model! Val Loss: {va_l:.4f}")
-
-                log_message(f"Ep{ep}/{args.epochs} ▶ train {tr_l:.4f} val {va_l:.4f} D_loss {avg_d_loss:.4f} "
-                           f"D_real_acc {d_real_acc:.4f} D_fake_acc {d_fake_acc:.4f} | adv_w {current_adv_w:.4f} | fm_w {feat_match_weight:.2f} | {t_s:.1f}s")
+        log_message(f"Ep{ep}/{args.epochs} ▶ train {tr_l:.4f} val {va_l:.4f} D_loss {avg_d_loss:.4f} "
+                   f"D_real_acc {d_real_acc:.4f} D_fake_acc {d_fake_acc:.4f} | adv_w {current_adv_w:.4f} | fm_w {feat_match_weight:.2f} | {t_s:.1f}s")
 
 # Qualitative 影像輸出
 @torch.no_grad()
@@ -801,7 +780,7 @@ def save_final_samples(G, z_dim, device, ckpt_dir):
     save_image(grid, os.path.join(ckpt_dir, "final_cifar10_generated.png"))
 
 if __name__ == "__main__":
-    os.makedirs('samples', exist_ok=True)  # 建立 samples 目錄
+    os.makedirs('samples', exist_ok=True)
 
     parser = argparse.ArgumentParser(description="Improved CVAE-GAN CIFAR-10 Trainer")
     parser.add_argument("--epochs", type=int, default=300)
@@ -809,7 +788,7 @@ if __name__ == "__main__":
     parser.add_argument("--z_dim", type=int, default=512)
     parser.add_argument("--lr", type=float, default=2e-4)
     parser.add_argument("--d_lr", type=float, default=1e-6)
-    parser.add_argument("--kl_warmup", type=int, default=30)  # 新增旗標
+    parser.add_argument("--kl_warmup", type=int, default=30)
     parser.add_argument("--adv_warmup_start", type=int, default=10)
     parser.add_argument("--adv_warmup_end", type=int, default=40)
     parser.add_argument("--adv_w", type=float, default=2.0)
@@ -823,8 +802,8 @@ if __name__ == "__main__":
     parser.add_argument("--data_root", type=str, default="./data")
     parser.add_argument("--ckpt_dir", type=str, default="./ckpt")
     parser.add_argument("--best_val", type=float, default=float('inf'))
-    parser.add_argument('--kl_max', type=float, default=0.1)  # 新增旗標
-    parser.add_argument('--n_gen_per_cls', type=int, default=1000)  # 新增旗標
+    parser.add_argument('--kl_max', type=float, default=0.1)
+    parser.add_argument('--n_gen_per_cls', type=int, default=1000)
     args = parser.parse_args()
 
     if args.resume and (Path(args.ckpt_dir) / "last.pth").exists():
